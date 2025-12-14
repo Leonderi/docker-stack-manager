@@ -687,10 +687,17 @@ class LXCCreateScreen(BaseScreen):
                 vm.initialized = True
                 config_loader.update_vm(vm.name, vm)
 
-                self.add_log("Initialization complete!")
-                self.add_log(f"SSH Key (manager): {manager_key_path}")
+                self.add_log("")
+                self.add_log("[bold green]========================================[/bold green]")
+                self.add_log("[bold green]   INITIALIZATION COMPLETE![/bold green]")
+                self.add_log("[bold green]========================================[/bold green]")
+                self.add_log("")
+                self.add_log(f"VM: {vm.name}")
+                self.add_log(f"User: manager")
+                self.add_log(f"SSH Key: {manager_key_path}")
+                self.add_log("")
                 self.show_status(f"{vm.name} initialized successfully!", "success")
-                self.notify(f"{vm.name} is ready to use!")
+                self.notify(f"{vm.name} is ready to use!", title="Initialization Complete")
 
                 # Update buttons
                 btn_create = self.query_one("#btn-create", Button)
@@ -701,7 +708,11 @@ class LXCCreateScreen(BaseScreen):
                 btn_cancel.label = "Done"
                 btn_cancel.variant = "primary"
             else:
-                self.add_log(f"Initialization failed: {message}")
+                self.add_log("")
+                self.add_log("[bold red]========================================[/bold red]")
+                self.add_log("[bold red]   INITIALIZATION FAILED![/bold red]")
+                self.add_log("[bold red]========================================[/bold red]")
+                self.add_log(f"Error: {message}")
                 self.show_status(f"Initialization failed: {message}", "error")
                 btn_create = self.query_one("#btn-create", Button)
                 btn_create.label = "Retry Initialize"

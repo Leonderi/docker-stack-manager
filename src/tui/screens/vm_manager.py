@@ -587,13 +587,24 @@ class VMManagerScreen(BaseScreen):
                 vm.initialized = True
                 config_loader.update_vm(vm.name, vm)
 
-                self.add_log("Initialization complete!")
-                self.add_log(f"SSH Key (manager): {manager_key_path}")
+                self.add_log("")
+                self.add_log("[bold green]========================================[/bold green]")
+                self.add_log("[bold green]   INITIALIZATION COMPLETE![/bold green]")
+                self.add_log("[bold green]========================================[/bold green]")
+                self.add_log("")
+                self.add_log(f"VM: {vm.name}")
+                self.add_log(f"User: manager")
+                self.add_log(f"SSH Key: {manager_key_path}")
+                self.add_log("")
                 self.show_status(f"{vm.name} initialized successfully!", "success")
-                self.notify(f"{vm.name} is ready!")
+                self.notify(f"{vm.name} is ready!", title="Initialization Complete")
                 self.refresh_vms()
             else:
-                self.add_log(f"[red]Failed: {message}[/red]")
+                self.add_log("")
+                self.add_log("[bold red]========================================[/bold red]")
+                self.add_log("[bold red]   INITIALIZATION FAILED![/bold red]")
+                self.add_log("[bold red]========================================[/bold red]")
+                self.add_log(f"Error: {message}")
                 self.show_status(f"Initialization failed: {message}", "error")
 
         elif event.state == WorkerState.ERROR:
