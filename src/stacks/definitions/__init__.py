@@ -1,5 +1,6 @@
 """Stack definitions - import all to register them."""
 
+from .traefik import TraefikStack
 from .influxdb import InfluxDBStack
 from .grafana import GrafanaStack
 from .vaultwarden import VaultwardenStack
@@ -12,6 +13,7 @@ from .paperless import PaperlessStack
 from .odoo import OdooStack
 
 __all__ = [
+    "TraefikStack",
     "InfluxDBStack",
     "GrafanaStack",
     "VaultwardenStack",

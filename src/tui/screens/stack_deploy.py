@@ -75,8 +75,8 @@ class StackDeployScreen(BaseScreen):
                 ListItem(Label(f"{info.display_name}"), id=f"stack-{name}")
             )
 
-    def populate_vms(self) -> None:
-        """Populate the VM selector."""
+    def populate_vms(self, role_filter: str = "worker") -> None:
+        """Populate the VM selector based on role filter."""
         config_loader = get_config_loader()
         vm_select = self.query_one("#target-vm", Select)
 
@@ -85,12 +85,14 @@ class StackDeployScreen(BaseScreen):
             options = [
                 (vm.name, vm.name)
                 for vm in vms_config.vms
-                if vm.role == "worker"
+                if vm.role == role_filter
             ]
 
             vm_select.set_options(options)
             if options:
                 vm_select.value = options[0][1]
+            else:
+                vm_select.set_options([])
 
         except Exception as e:
             self.log_message(f"Error loading VMs: {e}", "error")
@@ -111,6 +113,12 @@ class StackDeployScreen(BaseScreen):
 
         info = stack.info
 
+        # Update VM list based on stack type
+        if stack_name == "traefik":
+            self.populate_vms("traefik")
+        else:
+            self.populate_vms("worker")
+
         # Update description
         desc_widget = self.query_one("#stack-description", Static)
         desc_widget.update(
@@ -119,9 +127,14 @@ class StackDeployScreen(BaseScreen):
             f"Default port: {info.default_port}"
         )
 
-        # Update subdomain suggestion
+        # Update subdomain suggestion (not needed for Traefik)
         subdomain_input = self.query_one("#subdomain", Input)
-        subdomain_input.value = stack_name
+        if stack_name == "traefik":
+            subdomain_input.value = ""
+            subdomain_input.disabled = True
+        else:
+            subdomain_input.value = stack_name
+            subdomain_input.disabled = False
 
         # Create env var inputs
         env_container = self.query_one("#env-vars", VerticalScroll)
@@ -145,6 +158,10 @@ class StackDeployScreen(BaseScreen):
                 input_widget = Input(value=default, id=f"env-{var}")
                 env_container.mount(input_widget)
                 self.env_inputs[var] = input_widget
+
+        # Show message if no env vars
+        if not info.required_env_vars and not info.optional_env_vars:
+            env_container.mount(Static("[dim]No configuration needed[/dim]"))
 
     def log_message(self, message: str, level: str = "info") -> None:
         """Log a message to the deploy log."""
@@ -177,7 +194,8 @@ class StackDeployScreen(BaseScreen):
             return
 
         subdomain = self.query_one("#subdomain", Input).value.strip()
-        if not subdomain:
+        # Subdomain not required for Traefik
+        if not subdomain and self.selected_stack != "traefik":
             self.log_message("Subdomain is required", "error")
             return
 
