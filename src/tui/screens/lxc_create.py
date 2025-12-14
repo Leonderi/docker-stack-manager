@@ -2,7 +2,6 @@
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import (
     Button,
     Checkbox,
@@ -16,22 +15,29 @@ from textual.widgets import (
 )
 from textual.worker import Worker, WorkerState
 
+from ..base_screen import BaseScreen
 from ...core.config_loader import get_config_loader
-from ...core.lxc_manager import LXCCreationConfig, get_lxc_manager
+from ...core.lxc_manager import LXCCreationConfig, LXCCreationResult, get_lxc_manager
 from ...core.proxmox_api import ProxmoxAPIError
+from ...core.ssh_manager import get_vm_initializer
 
 
-class LXCCreateScreen(Screen):
+class LXCCreateScreen(BaseScreen):
     """Screen for creating new LXC containers via Proxmox."""
 
     CSS = """
     LXCCreateScreen {
         layout: vertical;
+        height: 100%;
+    }
+
+    LXCCreateScreen VerticalScroll {
+        height: 1fr;
+        max-height: 100%;
     }
 
     #create-container {
         height: 1fr;
-        width: 100%;
     }
 
     #create-title {
@@ -43,16 +49,14 @@ class LXCCreateScreen(Screen):
 
     #create-content {
         height: 1fr;
-        min-height: 10;
+        max-height: 100%;
         border: solid $primary;
-        margin: 1 2;
+        margin: 0 1;
         padding: 1;
-        overflow-y: auto;
     }
 
     #create-content > Vertical {
         height: auto;
-        width: 100%;
     }
 
     #create-buttons {
@@ -61,26 +65,21 @@ class LXCCreateScreen(Screen):
         align: center middle;
     }
 
-    #create-buttons Button {
-        margin: 0 1;
-    }
-
     #status-message {
         height: auto;
         text-align: center;
-        padding: 1;
     }
 
     #progress-container {
         height: auto;
-        margin: 1 2;
+        margin: 0 1;
     }
 
     #log-output {
         height: auto;
-        max-height: 10;
+        max-height: 8;
         border: solid $primary;
-        margin: 1 2;
+        margin: 0 1;
         padding: 1;
         background: $surface;
     }
@@ -95,6 +94,14 @@ class LXCCreateScreen(Screen):
         height: auto;
         margin-right: 1;
     }
+
+    .resource-row > Input {
+        width: 1fr;
+    }
+
+    .resource-row > Button {
+        width: auto;
+    }
     """
 
     BINDINGS = [
@@ -107,6 +114,8 @@ class LXCCreateScreen(Screen):
         self.templates = []
         self.creating = False
         self.log_messages = []
+        self._created_hostname = None
+        self._initializing = False
 
     def compose(self) -> ComposeResult:
         """Compose the LXC creation screen."""
@@ -114,18 +123,20 @@ class LXCCreateScreen(Screen):
             Static("[bold]Create LXC Container[/bold]", id="create-title"),
             VerticalScroll(
                 Vertical(
-                    Static("[bold]Container Settings[/bold]"),
+                    # Role first - determines hostname
+                    Static("[bold]Role & Identity[/bold]"),
                     Rule(),
-                    Label("Hostname:"),
-                    Input(placeholder="e.g., worker-1", id="lxc-hostname"),
-                    Label("Description:"),
-                    Input(placeholder="Optional description", id="lxc-description"),
                     Label("Role:"),
                     Select(
-                        [("Worker", "worker"), ("Traefik", "traefik"), ("Manager", "manager")],
+                        [("Worker", "worker"), ("Traefik (Reverse Proxy)", "traefik")],
                         id="lxc-role",
                         value="worker",
                     ),
+                    Static("", id="role-info"),
+                    Label("Hostname:"),
+                    Input(placeholder="auto-generated", id="lxc-hostname"),
+                    Label("Description:"),
+                    Input(placeholder="Optional description", id="lxc-description"),
                     Rule(),
                     Static("[bold]Network Configuration[/bold]"),
                     Label("IP Address:"),
@@ -142,6 +153,13 @@ class LXCCreateScreen(Screen):
                     Select([], id="lxc-node", allow_blank=True),
                     Label("Template:"),
                     Select([], id="lxc-template", allow_blank=True),
+                    Label("Container ID (VMID):"),
+                    Horizontal(
+                        Input(placeholder="Auto (leave empty)", id="lxc-vmid"),
+                        Button("Check", id="check-vmid", variant="default"),
+                        Button("Next Free", id="next-vmid", variant="default"),
+                        classes="resource-row",
+                    ),
                     Rule(),
                     Static("[bold]Resources[/bold]"),
                     Horizontal(
@@ -191,6 +209,8 @@ class LXCCreateScreen(Screen):
     def on_mount(self) -> None:
         """Initialize the screen."""
         self.load_proxmox_data()
+        self._check_traefik_exists()
+        self._generate_hostname()
 
     def load_proxmox_data(self) -> None:
         """Load nodes and templates from Proxmox."""
@@ -274,6 +294,58 @@ class LXCCreateScreen(Screen):
         """Handle select changes."""
         if event.select.id == "lxc-node":
             self.load_templates()
+        elif event.select.id == "lxc-role":
+            self._generate_hostname()
+            self._update_role_info()
+
+    def _check_traefik_exists(self) -> None:
+        """Check if a Traefik container already exists and update UI."""
+        config_loader = get_config_loader()
+        vms = config_loader.load_vms()
+        traefik_vm = vms.get_traefik_vm()
+
+        role_select = self.query_one("#lxc-role", Select)
+        role_info = self.query_one("#role-info", Static)
+
+        if traefik_vm:
+            # Traefik exists - remove from options or show warning
+            role_select.set_options([("Worker", "worker")])
+            role_select.value = "worker"
+            role_info.update(f"[yellow]Traefik already exists: {traefik_vm.name}[/yellow]")
+        else:
+            role_select.set_options([
+                ("Worker", "worker"),
+                ("Traefik (Reverse Proxy)", "traefik")
+            ])
+            role_info.update("")
+
+    def _update_role_info(self) -> None:
+        """Update role info text based on selection."""
+        role = self.query_one("#lxc-role", Select).value
+        role_info = self.query_one("#role-info", Static)
+
+        if role == "traefik":
+            role_info.update("[cyan]Traefik handles SSL and routing for all services[/cyan]")
+        else:
+            role_info.update("")
+
+    def _generate_hostname(self) -> None:
+        """Auto-generate hostname based on role."""
+        role = self.query_one("#lxc-role", Select).value
+        hostname_input = self.query_one("#lxc-hostname", Input)
+
+        config_loader = get_config_loader()
+        vms = config_loader.load_vms()
+
+        if role == "traefik":
+            hostname_input.value = "traefik"
+        else:
+            # Find next available worker number
+            existing_workers = [v.name for v in vms.vms if v.name.startswith("worker-")]
+            worker_num = 1
+            while f"worker-{worker_num}" in existing_workers:
+                worker_num += 1
+            hostname_input.value = f"worker-{worker_num}"
 
     def pick_available_ip(self) -> None:
         """Pick an available IP from the subnet."""
@@ -286,15 +358,38 @@ class LXCCreateScreen(Screen):
         else:
             self.show_status("No available IPs in subnet", "error")
 
-    def show_status(self, message: str, level: str = "info") -> None:
-        """Show a status message."""
-        status = self.query_one("#status-message", Static)
-        if level == "error":
-            status.update(f"[red]{message}[/red]")
-        elif level == "success":
-            status.update(f"[green]{message}[/green]")
-        else:
-            status.update(message)
+    def check_vmid_availability(self) -> None:
+        """Check if the entered VMID is available."""
+        vmid_input = self.query_one("#lxc-vmid", Input).value.strip()
+        if not vmid_input:
+            self.show_status("Enter a VMID to check", "info")
+            return
+
+        try:
+            vmid = int(vmid_input)
+            if vmid < 100:
+                self.show_status("VMID must be >= 100", "error")
+                return
+
+            lxc_manager = get_lxc_manager()
+            if lxc_manager.is_vmid_available(vmid):
+                self.show_status(f"VMID {vmid} is available", "success")
+            else:
+                self.show_status(f"VMID {vmid} is already in use", "error")
+        except ValueError:
+            self.show_status("VMID must be a number", "error")
+        except Exception as e:
+            self.show_status(f"Error checking VMID: {e}", "error")
+
+    def get_next_free_vmid(self) -> None:
+        """Get and fill in the next free VMID."""
+        try:
+            lxc_manager = get_lxc_manager()
+            vmid = lxc_manager.get_next_vmid()
+            self.query_one("#lxc-vmid", Input).value = str(vmid)
+            self.show_status(f"Next available VMID: {vmid}", "success")
+        except Exception as e:
+            self.show_status(f"Error getting next VMID: {e}", "error")
 
     def add_log(self, message: str) -> None:
         """Add a log message."""
@@ -312,6 +407,7 @@ class LXCCreateScreen(Screen):
         ip = self.query_one("#lxc-ip", Input).value.strip()
         node = self.query_one("#lxc-node", Select).value
         template = self.query_one("#lxc-template", Select).value
+        vmid_str = self.query_one("#lxc-vmid", Input).value.strip()
 
         if not hostname:
             return False, "Hostname is required"
@@ -321,6 +417,15 @@ class LXCCreateScreen(Screen):
             return False, "Please select a Proxmox node"
         if not template:
             return False, "Please select a template"
+
+        # Validate VMID if provided
+        if vmid_str:
+            try:
+                vmid = int(vmid_str)
+                if vmid < 100:
+                    return False, "VMID must be >= 100"
+            except ValueError:
+                return False, "VMID must be a number"
 
         # Validate IP format
         try:
@@ -355,6 +460,9 @@ class LXCCreateScreen(Screen):
 
         # Gather form data
         settings = get_config_loader().load_settings()
+        vmid_str = self.query_one("#lxc-vmid", Input).value.strip()
+        vmid = int(vmid_str) if vmid_str else 0
+
         config = LXCCreationConfig(
             hostname=self.query_one("#lxc-hostname", Input).value.strip(),
             ip_address=self.query_one("#lxc-ip", Input).value.strip(),
@@ -370,18 +478,25 @@ class LXCCreateScreen(Screen):
             description=self.query_one("#lxc-description", Input).value.strip(),
             template=self.query_one("#lxc-template", Select).value,
             node=self.query_one("#lxc-node", Select).value,
+            vmid=vmid,
         )
 
         # Run creation in worker thread
-        self.run_worker(self._create_container_worker(config), name="create_lxc")
+        self._current_config = config
+        self.run_worker(
+            self._create_container_worker,
+            name="create_lxc",
+            thread=True,
+        )
 
-    async def _create_container_worker(self, config: LXCCreationConfig):
-        """Worker to create container."""
+    def _create_container_worker(self) -> LXCCreationResult:
+        """Worker to create container (runs in thread)."""
         lxc_manager = get_lxc_manager()
+        config = self._current_config
 
         def progress_callback(msg: str):
-            self.call_from_thread(self.add_log, msg)
-            self.call_from_thread(self._update_progress)
+            self.app.call_from_thread(self.add_log, msg)
+            self.app.call_from_thread(self._update_progress)
 
         result = lxc_manager.create_container(config, progress_callback)
         return result
@@ -395,21 +510,38 @@ class LXCCreateScreen(Screen):
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle worker state changes."""
+        if event.worker.name == "initialize_vm":
+            self._handle_init_worker_state(event)
+            return
+
         if event.worker.name != "create_lxc":
             return
 
         if event.state == WorkerState.SUCCESS:
             result = event.worker.result
             self.creating = False
-            self.query_one("#btn-create", Button).disabled = False
             self.query_one("#create-progress", ProgressBar).update(progress=100)
 
             if result.success:
                 self.add_log(f"Container created: VMID {result.vmid}")
-                self.add_log(f"SSH Key: {result.ssh_key_path}")
-                self.show_status(result.message, "success")
+                self.add_log(f"SSH Key (root): {result.ssh_key_path}")
+                self.add_log("Click 'Initialize Now' to set up manager user")
+                self.show_status(f"{result.message}", "success")
                 self.notify(f"Container {result.hostname} created!")
+
+                # Store created container name for initialization
+                self._created_hostname = result.hostname
+
+                # Change buttons after successful creation
+                btn_create = self.query_one("#btn-create", Button)
+                btn_cancel = self.query_one("#btn-cancel", Button)
+                btn_create.label = "Initialize Now"
+                btn_create.variant = "warning"
+                btn_create.disabled = False
+                btn_cancel.label = "Back"
+                btn_cancel.variant = "default"
             else:
+                self.query_one("#btn-create", Button).disabled = False
                 self.show_status(result.error, "error")
 
         elif event.state == WorkerState.ERROR:
@@ -422,7 +554,18 @@ class LXCCreateScreen(Screen):
         button_id = event.button.id
 
         if button_id == "btn-create":
-            self.create_container()
+            btn_create = self.query_one("#btn-create", Button)
+            btn_cancel = self.query_one("#btn-cancel", Button)
+            label = str(btn_create.label)
+
+            if label == "Initialize Now" or label == "Retry Initialize":
+                # Start initialization for the created container
+                self.start_initialization()
+            elif label == "Create Another":
+                # Reset form for new container
+                self._reset_form()
+            else:
+                self.create_container()
 
         elif button_id == "btn-cancel":
             self.app.pop_screen()
@@ -430,7 +573,142 @@ class LXCCreateScreen(Screen):
         elif button_id == "pick-ip":
             self.pick_available_ip()
 
+        elif button_id == "check-vmid":
+            self.check_vmid_availability()
+
+        elif button_id == "next-vmid":
+            self.get_next_free_vmid()
+
     def action_cancel(self) -> None:
         """Cancel and go back."""
-        if not self.creating:
+        if not self.creating and not self._initializing:
             self.app.pop_screen()
+
+    def _reset_form(self) -> None:
+        """Reset form for creating another container."""
+        self._created_hostname = None
+        self._init_vm = None
+        self.log_messages = []
+
+        # Reset form fields
+        self.query_one("#lxc-description", Input).value = ""
+        self.query_one("#lxc-ip", Input).value = ""
+        self.query_one("#lxc-vmid", Input).value = ""
+
+        # Reset progress and log
+        self.query_one("#create-progress", ProgressBar).update(progress=0)
+        self.query_one("#log-output", Static).update("")
+
+        # Reset buttons
+        btn_create = self.query_one("#btn-create", Button)
+        btn_cancel = self.query_one("#btn-cancel", Button)
+        btn_create.label = "Create Container"
+        btn_create.variant = "success"
+        btn_cancel.label = "Cancel"
+        btn_cancel.variant = "default"
+
+        # Check traefik and regenerate hostname
+        self._check_traefik_exists()
+        self._generate_hostname()
+
+        self.show_status("Ready to create a new container")
+
+    def start_initialization(self) -> None:
+        """Start initialization for the created container."""
+        if not self._created_hostname:
+            self.show_status("No container to initialize", "error")
+            return
+
+        config_loader = get_config_loader()
+        vms = config_loader.load_vms()
+        vm = vms.get_vm_by_name(self._created_hostname)
+
+        if not vm:
+            self.show_status(f"Container {self._created_hostname} not found", "error")
+            return
+
+        if vm.initialized:
+            self.show_status(f"{vm.name} is already initialized", "warning")
+            return
+
+        if not vm.ssh_key:
+            self.show_status("Container has no SSH key configured", "error")
+            return
+
+        self._initializing = True
+        self._init_vm = vm
+        self.log_messages = []
+        self.query_one("#btn-create", Button).disabled = True
+        self.query_one("#create-progress", ProgressBar).update(progress=0)
+        self.add_log(f"Starting initialization of {vm.name}...")
+        self.show_status(f"Initializing {vm.name}... This may take several minutes.")
+
+        # Run initialization in worker thread
+        self.run_worker(
+            self._initialize_worker,
+            name="initialize_vm",
+            thread=True,
+        )
+
+    def _initialize_worker(self) -> tuple[bool, str, str]:
+        """Worker to initialize container (runs in thread)."""
+        from pathlib import Path
+
+        vm = self._init_vm
+        initializer = get_vm_initializer()
+
+        def progress_callback(msg: str):
+            self.app.call_from_thread(self.add_log, msg)
+            self.app.call_from_thread(self._update_progress)
+
+        success, manager_key_path, message = initializer.initialize_vm(
+            host=vm.host,
+            root_key_path=Path(vm.ssh_key),
+            vm_name=vm.name,
+            callback=progress_callback,
+            port=vm.ssh_port,
+        )
+
+        return success, str(manager_key_path), message
+
+    def _handle_init_worker_state(self, event: Worker.StateChanged) -> None:
+        """Handle initialization worker state changes."""
+        if event.state == WorkerState.SUCCESS:
+            success, manager_key_path, message = event.worker.result
+            self._initializing = False
+            self.query_one("#create-progress", ProgressBar).update(progress=100)
+
+            if success:
+                # Update VM config with new manager key
+                config_loader = get_config_loader()
+                vm = self._init_vm
+                vm.user = "manager"
+                vm.ssh_key = manager_key_path
+                vm.initialized = True
+                config_loader.update_vm(vm.name, vm)
+
+                self.add_log("Initialization complete!")
+                self.add_log(f"SSH Key (manager): {manager_key_path}")
+                self.show_status(f"{vm.name} initialized successfully!", "success")
+                self.notify(f"{vm.name} is ready to use!")
+
+                # Update buttons
+                btn_create = self.query_one("#btn-create", Button)
+                btn_cancel = self.query_one("#btn-cancel", Button)
+                btn_create.label = "Create Another"
+                btn_create.variant = "success"
+                btn_create.disabled = False
+                btn_cancel.label = "Done"
+                btn_cancel.variant = "primary"
+            else:
+                self.add_log(f"Initialization failed: {message}")
+                self.show_status(f"Initialization failed: {message}", "error")
+                btn_create = self.query_one("#btn-create", Button)
+                btn_create.label = "Retry Initialize"
+                btn_create.disabled = False
+
+        elif event.state == WorkerState.ERROR:
+            self._initializing = False
+            self.query_one("#btn-create", Button).disabled = False
+            self.add_log(f"Error: {event.worker.error}")
+            self.show_status(f"Error: {event.worker.error}", "error")

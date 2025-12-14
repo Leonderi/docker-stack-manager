@@ -5,7 +5,7 @@ from .vm_manager import VMManagerScreen
 from .stack_deploy import StackDeployScreen
 from .logs import LogViewerScreen
 from .settings import SettingsScreen
-from .setup_wizard import SetupWizardScreen
+from .lxc_create import LXCCreateScreen
 
 __all__ = [
     "DashboardScreen",
@@ -13,5 +13,5 @@ __all__ = [
     "StackDeployScreen",
     "LogViewerScreen",
     "SettingsScreen",
-    "SetupWizardScreen",
+    "LXCCreateScreen",
 ]

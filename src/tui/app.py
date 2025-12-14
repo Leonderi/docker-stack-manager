@@ -4,15 +4,12 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, Header
 
-from ..core.config_loader import get_config_loader
 from .screens.dashboard import DashboardScreen
 from .screens.vm_manager import VMManagerScreen
 from .screens.stack_deploy import StackDeployScreen
 from .screens.logs import LogViewerScreen
 from .screens.settings import SettingsScreen
-from .screens.setup_wizard import SetupWizardScreen
 from .screens.lxc_create import LXCCreateScreen
-from .screens.proxmox_settings import ProxmoxSettingsScreen
 
 
 class DockerStackManager(App):
@@ -154,17 +151,10 @@ class DockerStackManager(App):
         padding: 1;
     }
 
-    /* Default VerticalScroll for lists etc - but not wizard */
+    /* Default VerticalScroll for lists etc */
     VerticalScroll {
         height: auto;
         max-height: 25;
-    }
-
-    /* Allow wizard content to fill available space and scroll */
-    SetupWizardScreen #wizard-content {
-        height: 1fr;
-        max-height: 100%;
-        overflow-y: auto;
     }
 
     Rule {
@@ -173,28 +163,6 @@ class DockerStackManager(App):
 
     Checkbox {
         margin: 1 0;
-    }
-
-    #wizard-title {
-        text-style: bold;
-        text-align: center;
-        padding: 1;
-    }
-
-    #wizard-content {
-        height: auto;
-        padding: 1;
-        border: solid $primary;
-        margin: 1;
-    }
-
-    #wizard-buttons {
-        margin: 1;
-    }
-
-    #step-indicator {
-        text-align: center;
-        padding: 1;
     }
 
     #action-buttons {
@@ -230,9 +198,7 @@ class DockerStackManager(App):
         "stacks": StackDeployScreen,
         "logs": LogViewerScreen,
         "settings": SettingsScreen,
-        "setup": SetupWizardScreen,
         "lxc_create": LXCCreateScreen,
-        "proxmox_settings": ProxmoxSettingsScreen,
     }
 
     def compose(self) -> ComposeResult:
@@ -242,13 +208,7 @@ class DockerStackManager(App):
 
     def on_mount(self) -> None:
         """Called when the app is mounted."""
-        # Check if this is first run
-        config_loader = get_config_loader()
-
-        if config_loader.is_first_run():
-            self.push_screen("setup")
-        else:
-            self.push_screen("dashboard")
+        self.push_screen("dashboard")
 
     def action_go_back(self) -> None:
         """Go back to the previous screen."""

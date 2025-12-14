@@ -48,6 +48,7 @@ class LXCCreationConfig:
     template: str = ""  # Empty = use default
     node: str = ""  # Empty = use default
     bridge: str = ""  # Empty = use default
+    vmid: int = 0  # 0 = auto-assign
 
 
 class LXCManager:
@@ -126,6 +127,16 @@ class LXCManager:
 
         return api.get_storage_list(node)
 
+    def get_next_vmid(self) -> int:
+        """Get the next available VMID."""
+        api = self._get_api()
+        return api.get_next_vmid()
+
+    def is_vmid_available(self, vmid: int) -> bool:
+        """Check if a VMID is available."""
+        api = self._get_api()
+        return api.is_vmid_available(vmid)
+
     def get_containers(self, node: str = None) -> list[dict]:
         """Get all LXC containers on a node."""
         settings = self.config_loader.load_settings()
@@ -177,16 +188,27 @@ class LXCManager:
 
             log(f"Using node: {node}")
 
-            # Get next VMID
-            vmid = api.get_next_vmid()
-            log(f"Allocated VMID: {vmid}")
+            # Get or validate VMID
+            if config.vmid > 0:
+                # Use provided VMID if available
+                if not api.is_vmid_available(config.vmid):
+                    return LXCCreationResult(
+                        success=False,
+                        error=f"VMID {config.vmid} is already in use"
+                    )
+                vmid = config.vmid
+                log(f"Using provided VMID: {vmid}")
+            else:
+                # Auto-assign next available VMID
+                vmid = api.get_next_vmid()
+                log(f"Allocated VMID: {vmid}")
 
-            # Generate SSH keypair
-            key_name = f"lxc-{config.hostname}"
-            log(f"Generating SSH keypair: {key_name}")
+            # Generate SSH keypair for root access (temporary, until initialization)
+            key_name = f"{config.hostname}_root"
+            log(f"Generating root SSH keypair: {key_name}")
             private_key_path, public_key_path, public_key = self.ssh_key_manager.get_or_create_keypair(
                 key_name,
-                comment=f"{config.hostname}@docker-stack-manager"
+                comment=f"root@{config.hostname}"
             )
             log(f"SSH key saved to: {private_key_path}")
 
@@ -271,7 +293,7 @@ class LXCManager:
             vm_config = VMConfig(
                 name=config.hostname,
                 host=config.ip_address,
-                user="root",
+                user="root",  # Will be changed to "manager" after initialization
                 ssh_key=str(private_key_path),
                 ssh_port=22,
                 role=config.role,
@@ -284,6 +306,9 @@ class LXCManager:
                     dns_secondary=dns2,
                 ),
                 proxmox_vmid=vmid,
+                proxmox_type="lxc",
+                proxmox_node=node,
+                initialized=False,  # Must run Initialize to set up manager user
             )
             self.config_loader.add_vm(vm_config)
 
@@ -352,22 +377,40 @@ class LXCManager:
             except Exception:
                 hostname = ""
 
-            # Stop container if running
+            # Stop container if running and wait for it
             try:
                 status = api.get_lxc_status(node, vmid)
                 if status.get("status") == "running":
-                    api.stop_lxc(node, vmid)
-                    time.sleep(2)  # Wait for stop
+                    upid = api.stop_lxc(node, vmid)
+                    # Wait for stop task to complete
+                    if upid:
+                        try:
+                            api.wait_for_task(node, upid, timeout=60)
+                        except Exception:
+                            pass
+                    # Additional wait to ensure container is fully stopped
+                    for _ in range(10):
+                        time.sleep(1)
+                        status = api.get_lxc_status(node, vmid)
+                        if status.get("status") != "running":
+                            break
             except Exception:
                 pass
 
             # Delete container
-            api.delete_lxc(node, vmid)
+            upid = api.delete_lxc(node, vmid)
+            if upid:
+                try:
+                    api.wait_for_task(node, upid, timeout=120)
+                except Exception:
+                    pass
 
-            # Delete SSH key if requested
+            # Delete SSH keys if requested (both root and manager keys)
             if delete_ssh_key and hostname:
-                key_name = f"lxc-{hostname}"
-                self.ssh_key_manager.delete_keypair(key_name)
+                # Delete root key
+                self.ssh_key_manager.delete_keypair(f"{hostname}_root")
+                # Delete manager key (if initialized)
+                self.ssh_key_manager.delete_keypair(f"{hostname}_manager")
 
             # Remove from config
             if hostname:

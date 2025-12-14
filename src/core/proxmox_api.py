@@ -66,21 +66,37 @@ class ProxmoxAPI:
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
 
         try:
-            response = requests.request(
-                method=method,
-                url=url,
-                headers=self.headers,
-                json=data if method in ("POST", "PUT") else None,
-                params=params,
-                verify=self.verify_ssl,
-                timeout=30,
-            )
+            # For POST requests, use form data instead of JSON (Proxmox prefers this)
+            if method in ("POST", "PUT") and data:
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    headers={"Authorization": self.auth_header},
+                    data=data,
+                    verify=self.verify_ssl,
+                    timeout=30,
+                )
+            else:
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    headers=self.headers,
+                    params=params,
+                    verify=self.verify_ssl,
+                    timeout=30,
+                )
 
-            # Parse response
-            try:
-                result = response.json()
-            except ValueError:
-                result = {"data": response.text}
+            # Parse response - handle empty responses
+            response_text = response.text.strip()
+            if not response_text:
+                # Empty response is OK for some operations (start/stop return UPID in data)
+                result = {"data": None}
+            else:
+                try:
+                    result = response.json()
+                except ValueError:
+                    # If response isn't JSON but not empty, wrap it
+                    result = {"data": response_text}
 
             # Check for errors
             if response.status_code >= 400:
@@ -153,6 +169,15 @@ class ProxmoxAPI:
     def get_next_vmid(self) -> int:
         """Get the next available VMID."""
         return int(self.get("cluster/nextid"))
+
+    def is_vmid_available(self, vmid: int) -> bool:
+        """Check if a VMID is available (not in use)."""
+        try:
+            resources = self.get("cluster/resources", params={"type": "vm"})
+            used_vmids = {r.get("vmid") for r in resources}
+            return vmid not in used_vmids
+        except ProxmoxAPIError:
+            return False
 
     def get_storage_list(self, node: str) -> list[dict]:
         """Get available storage on a node."""
@@ -303,6 +328,61 @@ class ProxmoxAPI:
             data["target"] = target
 
         return self.post(f"nodes/{node}/lxc/{vmid}/clone", data=data)
+
+    # ==================== QEMU VM Methods ====================
+
+    def get_qemu_vms(self, node: str) -> list[dict]:
+        """Get all QEMU VMs on a node."""
+        return self.get(f"nodes/{node}/qemu")
+
+    def get_qemu_status(self, node: str, vmid: int) -> dict:
+        """Get QEMU VM status."""
+        return self.get(f"nodes/{node}/qemu/{vmid}/status/current")
+
+    def start_qemu(self, node: str, vmid: int) -> str:
+        """Start a QEMU VM."""
+        return self.post(f"nodes/{node}/qemu/{vmid}/status/start")
+
+    def stop_qemu(self, node: str, vmid: int) -> str:
+        """Stop a QEMU VM."""
+        return self.post(f"nodes/{node}/qemu/{vmid}/status/stop")
+
+    def shutdown_qemu(self, node: str, vmid: int, timeout: int = 60) -> str:
+        """Gracefully shutdown a QEMU VM."""
+        return self.post(f"nodes/{node}/qemu/{vmid}/status/shutdown", {"timeout": timeout})
+
+    # ==================== Generic VM Methods ====================
+
+    def start_vm(self, node: str, vmid: int, vm_type: str = "lxc") -> str:
+        """Start a VM/LXC container."""
+        if vm_type == "lxc":
+            return self.start_lxc(node, vmid)
+        elif vm_type == "qemu":
+            return self.start_qemu(node, vmid)
+        else:
+            raise ProxmoxAPIError(f"Unknown VM type: {vm_type}")
+
+    def stop_vm(self, node: str, vmid: int, vm_type: str = "lxc") -> str:
+        """Stop a VM/LXC container."""
+        if vm_type == "lxc":
+            return self.stop_lxc(node, vmid)
+        elif vm_type == "qemu":
+            return self.stop_qemu(node, vmid)
+        else:
+            raise ProxmoxAPIError(f"Unknown VM type: {vm_type}")
+
+    def get_vm_status(self, node: str, vmid: int, vm_type: str = "lxc") -> dict:
+        """Get VM/LXC status."""
+        if vm_type == "lxc":
+            return self.get_lxc_status(node, vmid)
+        elif vm_type == "qemu":
+            return self.get_qemu_status(node, vmid)
+        else:
+            raise ProxmoxAPIError(f"Unknown VM type: {vm_type}")
+
+    def is_configured(self) -> bool:
+        """Check if API is properly configured."""
+        return bool(self.host and self.auth_header)
 
     # ==================== Task Methods ====================
 

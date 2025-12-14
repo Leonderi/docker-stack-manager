@@ -12,13 +12,20 @@ class TraefikConfig(BaseModel):
     """Traefik-specific configuration."""
     dashboard_enabled: bool = True
     dashboard_subdomain: str = "traefik"
-    dashboard_auth: str = ""
+    dashboard_access: str = "local"  # "local" (no auth) or "public" (with auth via domain)
+    dashboard_username: str = "admin"
+    dashboard_password: str = ""  # Plain text, will be hashed for htpasswd
+    dashboard_auth: str = ""  # Legacy htpasswd format, kept for compatibility
 
 
 class SSLConfig(BaseModel):
     """SSL/TLS configuration."""
     provider: str = "letsencrypt"
     staging: bool = True
+    challenge_type: str = "http"  # "http" or "dns"
+    dns_provider: str = ""  # cloudflare, route53, etc.
+    dns_api_key: str = ""
+    dns_api_secret: str = ""
 
 
 class OPNsenseConfig(BaseModel):
@@ -153,19 +160,28 @@ class VMConfig(BaseModel):
     """Virtual machine configuration."""
     name: str
     host: str  # Can be IP or hostname for SSH connection
-    user: str = "root"
-    ssh_key: str = "~/.ssh/id_rsa"
+    user: str = "manager"  # Default user after initialization
+    ssh_key: str = ""  # Path to private SSH key
     ssh_port: int = 22
     role: str = "worker"  # "traefik", "worker", or "manager"
     description: str = ""
     stacks: list[str] = Field(default_factory=list)
     network: VMNetworkConfig = Field(default_factory=VMNetworkConfig)
-    proxmox_vmid: int = 0  # Optional Proxmox VM ID for future integration
+
+    # Proxmox Integration
+    proxmox_vmid: int = 0
+    proxmox_type: str = ""  # "lxc", "qemu", or "external"
+    proxmox_node: str = ""
+
+    # Initialization Status
+    initialized: bool = False  # True after setup script completed
 
     @property
     def ssh_key_path(self) -> Path:
         """Return expanded SSH key path."""
-        return Path(self.ssh_key).expanduser()
+        if self.ssh_key:
+            return Path(self.ssh_key).expanduser()
+        return Path()
 
     @property
     def display_ip(self) -> str:

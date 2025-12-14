@@ -1,12 +1,11 @@
 """Dashboard screen showing overview of VMs and stacks."""
 
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Static
+from textual.widgets import Button, DataTable, Footer, Static
 
 from ...core.config_loader import get_config_loader
-from ...core.ssh_manager import get_ssh_manager
 from ...core.docker_manager import get_docker_manager
 from ...core.traefik_manager import get_traefik_manager
 
@@ -14,69 +13,132 @@ from ...core.traefik_manager import get_traefik_manager
 class DashboardScreen(Screen):
     """Main dashboard showing system overview."""
 
+    CSS = """
+    DashboardScreen {
+        layout: vertical;
+        height: 100%;
+    }
+
+    #dashboard-title {
+        width: 100%;
+        height: auto;
+        content-align: center middle;
+        text-style: bold;
+        color: $primary;
+        padding: 0;
+    }
+
+    #dashboard-content {
+        height: 1fr;
+        width: 100%;
+    }
+
+    DashboardScreen VerticalScroll {
+        height: 1fr;
+        max-height: 100%;
+    }
+
+    #vm-section {
+        width: 100%;
+        height: auto;
+        min-height: 8;
+    }
+
+    #info-row {
+        height: auto;
+        min-height: 6;
+    }
+
+    #info-row > Vertical {
+        width: 1fr;
+        height: auto;
+    }
+
+    #stacks-section {
+        height: auto;
+        min-height: 6;
+    }
+
+    .box {
+        border: solid $primary;
+        margin: 0 1 1 1;
+        padding: 1;
+    }
+
+    #action-buttons {
+        dock: bottom;
+        height: auto;
+        padding: 1;
+        align: center middle;
+        background: $surface;
+    }
+
+    #action-buttons Button {
+        margin: 0 1;
+    }
+    """
+
     BINDINGS = [
         ("r", "refresh", "Refresh"),
     ]
 
+    TITLE_ASCII = """[bold cyan]
+ ██████╗  █████╗ ███████╗██╗  ██╗██████╗  ██████╗  █████╗ ██████╗ ██████╗
+ ██╔══██╗██╔══██╗██╔════╝██║  ██║██╔══██╗██╔═══██╗██╔══██╗██╔══██╗██╔══██╗
+ ██║  ██║███████║███████╗███████║██████╔╝██║   ██║███████║██████╔╝██║  ██║
+ ██║  ██║██╔══██║╚════██║██╔══██║██╔══██╗██║   ██║██╔══██║██╔══██╗██║  ██║
+ ██████╔╝██║  ██║███████║██║  ██║██████╔╝╚██████╔╝██║  ██║██║  ██║██████╔╝
+ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝
+[/bold cyan]"""
+
     def compose(self) -> ComposeResult:
         """Compose the dashboard screen."""
-        yield Container(
-            Horizontal(
-                Static("Dashboard", classes="title"),
-                Button("Settings", id="settings-btn", variant="default"),
-                id="header-row",
+        yield Static(self.TITLE_ASCII.strip(), id="dashboard-title")
+        yield VerticalScroll(
+            # VM Section - Full Width
+            Vertical(
+                Static("[bold]Virtual Machines[/bold]"),
+                DataTable(id="vm-table"),
+                classes="box",
+                id="vm-section",
             ),
+            # Info Row - Traefik + Stats side by side
             Horizontal(
                 Vertical(
-                    Static("Virtual Machines", classes="title"),
-                    DataTable(id="vm-table"),
-                    Horizontal(
-                        Button("Manage VMs", id="manage-vms", variant="primary"),
-                        Button("Refresh", id="refresh-vms", variant="default"),
-                    ),
-                    classes="box",
-                    id="vm-section",
-                ),
-                Vertical(
-                    Static("Traefik Status", classes="title"),
+                    Static("[bold]Traefik Status[/bold]"),
                     Static("Loading...", id="traefik-status"),
                     Static("", id="traefik-routes"),
-                    Horizontal(
-                        Button("Deploy Traefik", id="deploy-traefik", variant="success"),
-                        Button("View Logs", id="traefik-logs", variant="default"),
-                    ),
                     classes="box",
                     id="traefik-section",
                 ),
-                id="top-row",
-            ),
-            Horizontal(
                 Vertical(
-                    Static("Network Info", classes="title"),
+                    Static("[bold]Network & Stats[/bold]"),
                     Static("", id="network-info"),
-                    classes="box",
-                    id="network-section",
-                ),
-                Vertical(
-                    Static("Quick Stats", classes="title"),
                     Static("", id="quick-stats"),
                     classes="box",
                     id="stats-section",
                 ),
-                id="middle-row",
+                id="info-row",
             ),
+            # Stacks Section
             Vertical(
-                Static("Deployed Stacks", classes="title"),
+                Static("[bold]Deployed Stacks[/bold]"),
                 DataTable(id="stacks-table"),
-                Horizontal(
-                    Button("Deploy Stack", id="deploy-stack", variant="success"),
-                    Button("Refresh Stacks", id="refresh-stacks", variant="default"),
-                ),
                 classes="box",
                 id="stacks-section",
             ),
-            id="main-content",
+            id="dashboard-content",
         )
+        # Action buttons at bottom
+        yield Horizontal(
+            Button("Settings", id="btn-settings", variant="default"),
+            Button("Manage VMs", id="btn-vms", variant="primary"),
+            Button("Deploy Stack", id="btn-stacks", variant="success"),
+            Button("View Logs", id="btn-logs", variant="default"),
+            Button("Refresh", id="btn-refresh", variant="default"),
+            id="action-buttons",
+        )
+        yield Footer()
 
     def on_mount(self) -> None:
         """Initialize tables and load data."""
@@ -89,6 +151,13 @@ class DashboardScreen(Screen):
         stacks_table.add_columns("Stack", "VM", "Status", "URL")
 
         # Load data
+        self.action_refresh()
+
+    def on_screen_resume(self) -> None:
+        """Refresh data when returning to dashboard from another screen."""
+        # Reload settings in case they changed
+        config_loader = get_config_loader()
+        config_loader.load_settings(reload=True)
         self.action_refresh()
 
     def action_refresh(self) -> None:
@@ -206,7 +275,7 @@ class DashboardScreen(Screen):
                 else:
                     routes_widget.update("No routes configured")
 
-            except Exception as e:
+            except Exception:
                 status_widget.update(f"[yellow]Cannot connect[/yellow]: {traefik_vm.host}")
                 routes_widget.update("Check VM connectivity")
 
@@ -243,28 +312,21 @@ class DashboardScreen(Screen):
         """Handle button presses."""
         button_id = event.button.id
 
-        if button_id == "refresh-vms":
-            self.refresh_vms()
-            self.notify("VMs refreshed")
-
-        elif button_id == "refresh-stacks":
-            self.refresh_stacks()
-            self.notify("Stacks refreshed")
-
-        elif button_id == "deploy-stack":
-            self.app.push_screen("stacks")
-
-        elif button_id == "traefik-logs":
-            self.app.push_screen("logs")
-
-        elif button_id == "manage-vms":
-            self.app.push_screen("vms")
-
-        elif button_id == "settings-btn":
+        if button_id == "btn-settings":
             self.app.push_screen("settings")
 
-        elif button_id == "deploy-traefik":
-            self.deploy_traefik()
+        elif button_id == "btn-vms":
+            self.app.push_screen("vms")
+
+        elif button_id == "btn-stacks":
+            self.app.push_screen("stacks")
+
+        elif button_id == "btn-logs":
+            self.app.push_screen("logs")
+
+        elif button_id == "btn-refresh":
+            self.action_refresh()
+            self.notify("Dashboard refreshed")
 
     def deploy_traefik(self) -> None:
         """Deploy Traefik to the Traefik VM."""

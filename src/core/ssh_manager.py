@@ -3,12 +3,14 @@
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fabric import Connection
+from invoke.exceptions import UnexpectedExit
 from paramiko import RSAKey, Ed25519Key, ECDSAKey
 
 from .config_loader import VMConfig
+from .ssh_keygen import get_ssh_key_manager
 
 
 @dataclass
@@ -159,8 +161,229 @@ class SSHManager:
         return result.success
 
 
+class VMInitializer:
+    """Initialize VMs/LXCs with standard setup."""
+
+    SETUP_SCRIPT = '''#!/bin/bash
+set -e
+
+echo "=== System Update ==="
+apt update && DEBIAN_FRONTEND=noninteractive apt upgrade -y
+
+echo "=== Installing Base Packages ==="
+DEBIAN_FRONTEND=noninteractive apt install -y sudo curl wget git ca-certificates gnupg ufw
+
+echo "=== Creating User 'manager' ==="
+if ! id -u manager >/dev/null 2>&1; then
+    useradd -m -s /bin/bash -G sudo manager
+fi
+echo "manager ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/manager
+chmod 440 /etc/sudoers.d/manager
+
+echo "=== Setting up SSH Key ==="
+mkdir -p /home/manager/.ssh
+echo "{public_key}" > /home/manager/.ssh/authorized_keys
+chown -R manager:manager /home/manager/.ssh
+chmod 700 /home/manager/.ssh
+chmod 600 /home/manager/.ssh/authorized_keys
+
+echo "=== Locking Root Account ==="
+passwd -l root
+sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+systemctl restart sshd
+
+echo "=== Configuring Firewall ==="
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp comment 'SSH'
+ufw allow 80/tcp comment 'HTTP'
+ufw allow 443/tcp comment 'HTTPS'
+ufw --force enable
+
+echo "=== Installing Docker ==="
+if ! command -v docker &> /dev/null; then
+    curl -fsSL https://get.docker.com | sh
+fi
+usermod -aG docker manager
+
+echo "=== Verifying Docker ==="
+docker --version
+docker compose version
+
+echo "=== Setup Complete ==="
+'''
+
+    def __init__(self, ssh_manager: "SSHManager"):
+        """Initialize with SSH manager."""
+        self.ssh = ssh_manager
+        self.key_manager = get_ssh_key_manager()
+
+    def initialize_vm(
+        self,
+        host: str,
+        root_key_path: Path,
+        vm_name: str,
+        callback: Optional[Callable[[str], None]] = None,
+        port: int = 22,
+    ) -> tuple[bool, Path, str]:
+        """Initialize a VM with standard setup.
+
+        Args:
+            host: VM IP address
+            root_key_path: Path to root's private SSH key
+            vm_name: Name of the VM (for key naming)
+            callback: Progress callback function
+            port: SSH port
+
+        Returns:
+            Tuple of (success, manager_key_path, message)
+        """
+        def log(msg: str):
+            if callback:
+                callback(msg)
+
+        try:
+            # Generate manager keypair
+            log("Generating SSH keypair for manager user...")
+
+            key_name = f"{vm_name}_manager"
+            private_path, public_path, public_key = self.key_manager.get_or_create_keypair(
+                key_name, comment=f"manager@{vm_name}"
+            )
+            log(f"✓ Key generated: {key_name}")
+
+            # Create temporary VMConfig for root connection
+            root_vm = VMConfig(
+                name=f"{vm_name}_root_temp",
+                host=host,
+                user="root",
+                ssh_key=str(root_key_path),
+                ssh_port=port,
+            )
+
+            # Connect as root
+            log(f"Connecting to {host} as root...")
+
+            try:
+                conn = self.ssh.get_connection(root_vm)
+                log("✓ Connected to VM")
+            except Exception as e:
+                return False, Path(), f"Failed to connect as root: {e}"
+
+            # Run setup steps individually for better logging
+            steps = [
+                ("Updating system packages", "apt update && DEBIAN_FRONTEND=noninteractive apt upgrade -y"),
+                ("Installing base packages", "DEBIAN_FRONTEND=noninteractive apt install -y sudo curl wget git ca-certificates gnupg ufw"),
+                ("Creating 'manager' user", '''
+                    if ! id -u manager >/dev/null 2>&1; then
+                        useradd -m -s /bin/bash -G sudo manager
+                    fi
+                    echo "manager ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/manager
+                    chmod 440 /etc/sudoers.d/manager
+                '''),
+                ("Setting up SSH key for manager", f'''
+                    mkdir -p /home/manager/.ssh
+                    echo "{public_key}" > /home/manager/.ssh/authorized_keys
+                    chown -R manager:manager /home/manager/.ssh
+                    chmod 700 /home/manager/.ssh
+                    chmod 600 /home/manager/.ssh/authorized_keys
+                '''),
+                ("Securing SSH configuration", '''
+                    passwd -l root
+                    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+                    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+                    systemctl restart sshd
+                '''),
+                ("Configuring firewall", '''
+                    ufw default deny incoming
+                    ufw default allow outgoing
+                    ufw allow 22/tcp comment 'SSH'
+                    ufw allow 80/tcp comment 'HTTP'
+                    ufw allow 443/tcp comment 'HTTPS'
+                    ufw --force enable
+                '''),
+                ("Installing Docker", '''
+                    if ! command -v docker &> /dev/null; then
+                        curl -fsSL https://get.docker.com | sh
+                    fi
+                    usermod -aG docker manager
+                '''),
+                ("Verifying Docker installation", "docker --version && docker compose version"),
+            ]
+
+            for step_name, command in steps:
+                log(f"→ {step_name}...")
+                result = self.ssh.run_command(root_vm, command)
+                if not result.success:
+                    # Close root connection
+                    self.ssh.close_connection(root_vm.name)
+                    log(f"✗ {step_name} failed")
+                    return False, private_path, f"{step_name} failed:\n{result.stderr}\n{result.stdout}"
+                log(f"✓ {step_name}")
+
+            # Close root connection
+            self.ssh.close_connection(root_vm.name)
+
+            # Test connection as manager
+            log("Testing connection as manager...")
+
+            manager_vm = VMConfig(
+                name=f"{vm_name}_manager_test",
+                host=host,
+                user="manager",
+                ssh_key=str(private_path),
+                ssh_port=port,
+            )
+
+            test_ok, test_msg = self.ssh.test_connection(manager_vm)
+            self.ssh.close_connection(manager_vm.name)
+
+            if test_ok:
+                log("✓ Manager login successful!")
+                return True, private_path, "VM initialized successfully"
+            else:
+                return False, private_path, f"Setup completed but manager login failed: {test_msg}"
+
+        except Exception as e:
+            return False, Path(), f"Initialization failed: {e}"
+
+    def run_setup_step(
+        self,
+        vm: VMConfig,
+        step_name: str,
+        command: str,
+        callback: Optional[Callable[[str], None]] = None,
+    ) -> tuple[bool, str]:
+        """Run a single setup step on a VM.
+
+        Args:
+            vm: VM configuration
+            step_name: Name of the step for logging
+            command: Command to execute
+            callback: Progress callback
+
+        Returns:
+            Tuple of (success, output)
+        """
+        if callback:
+            callback(f"Running: {step_name}...")
+
+        result = self.ssh.run_command(vm, command)
+
+        if result.success:
+            if callback:
+                callback(f"✓ {step_name} completed")
+            return True, result.stdout
+        else:
+            if callback:
+                callback(f"✗ {step_name} failed: {result.stderr}")
+            return False, result.stderr
+
+
 # Global SSH manager instance
 _ssh_manager: Optional[SSHManager] = None
+_vm_initializer: Optional[VMInitializer] = None
 
 
 def get_ssh_manager() -> SSHManager:
@@ -169,3 +392,11 @@ def get_ssh_manager() -> SSHManager:
     if _ssh_manager is None:
         _ssh_manager = SSHManager()
     return _ssh_manager
+
+
+def get_vm_initializer() -> VMInitializer:
+    """Get or create the global VM initializer instance."""
+    global _vm_initializer
+    if _vm_initializer is None:
+        _vm_initializer = VMInitializer(get_ssh_manager())
+    return _vm_initializer
