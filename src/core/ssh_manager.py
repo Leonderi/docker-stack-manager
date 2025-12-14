@@ -210,7 +210,8 @@ class SSHManager:
     ) -> CommandResult:
         """Execute a command on a VM."""
         conn = self.get_connection(vm)
-        result = conn.run(command, hide=hide, warn=warn)
+        # Disable PTY and stdin to work in TUI environment
+        result = conn.run(command, hide=hide, warn=warn, pty=False, in_stream=False)
         return CommandResult.from_fabric_result(result)
 
     def test_connection(self, vm: VMConfig) -> tuple[bool, str]:
@@ -345,6 +346,7 @@ echo "=== Setup Complete ==="
         root_key_path: Path,
         vm_name: str,
         callback: Optional[Callable[[str], None]] = None,
+        detail_callback: Optional[Callable[[str], None]] = None,
         port: int = 22,
     ) -> tuple[bool, Path, str]:
         """Initialize a VM with standard setup.
@@ -354,6 +356,7 @@ echo "=== Setup Complete ==="
             root_key_path: Path to root's private SSH key
             vm_name: Name of the VM (for key naming)
             callback: Progress callback function
+            detail_callback: Detailed output callback (for SSH stdout/stderr)
             port: SSH port
 
         Returns:
@@ -362,6 +365,10 @@ echo "=== Setup Complete ==="
         def log(msg: str):
             if callback:
                 callback(msg)
+
+        def log_detail(msg: str):
+            if detail_callback:
+                detail_callback(msg)
 
         try:
             # Generate manager keypair
@@ -435,10 +442,22 @@ echo "=== Setup Complete ==="
             for step_name, command in steps:
                 log(f"→ {step_name}...")
                 result = self.ssh.run_command(root_vm, command)
+
+                # Log detailed output if callback provided
+                if result.stdout:
+                    for line in result.stdout.split('\n'):
+                        if line.strip():
+                            log_detail(f"  {line}")
+                if result.stderr:
+                    for line in result.stderr.split('\n'):
+                        if line.strip():
+                            log_detail(f"  [stderr] {line}")
+
                 if not result.success:
                     # Close root connection
                     self.ssh.close_connection(root_vm.name)
                     log(f"✗ {step_name} failed")
+                    log_detail(f"Exit code: {result.return_code}")
                     return False, private_path, f"{step_name} failed:\n{result.stderr}\n{result.stdout}"
                 log(f"✓ {step_name}")
 

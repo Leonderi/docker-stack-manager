@@ -73,15 +73,26 @@ class LXCCreateScreen(BaseScreen):
     #progress-container {
         height: auto;
         margin: 0 1;
+        align: left middle;
+    }
+
+    #progress-container ProgressBar {
+        width: 1fr;
+    }
+
+    #progress-container Checkbox {
+        width: auto;
+        margin-left: 2;
     }
 
     #log-output {
         height: auto;
-        max-height: 8;
+        max-height: 15;
         border: solid $primary;
         margin: 0 1;
         padding: 1;
         background: $surface;
+        overflow-y: auto;
     }
 
     .resource-row {
@@ -191,8 +202,9 @@ class LXCCreateScreen(BaseScreen):
                 ),
                 id="create-content",
             ),
-            Vertical(
+            Horizontal(
                 ProgressBar(total=100, id="create-progress"),
+                Checkbox("Show Details", id="show-details"),
                 id="progress-container",
             ),
             Static("", id="log-output"),
@@ -394,12 +406,22 @@ class LXCCreateScreen(BaseScreen):
     def add_log(self, message: str) -> None:
         """Add a log message."""
         self.log_messages.append(message)
-        # Keep last 10 messages
-        if len(self.log_messages) > 10:
-            self.log_messages = self.log_messages[-10:]
+        # Keep last 30 messages (more for details mode)
+        max_messages = 30
+        if len(self.log_messages) > max_messages:
+            self.log_messages = self.log_messages[-max_messages:]
 
         log_output = self.query_one("#log-output", Static)
         log_output.update("\n".join(self.log_messages))
+
+    def add_detail_log(self, message: str) -> None:
+        """Add a detail log message (only if Show Details is enabled)."""
+        try:
+            show_details = self.query_one("#show-details", Checkbox).value
+            if show_details:
+                self.add_log(f"[dim]{message}[/dim]")
+        except Exception:
+            pass
 
     def validate_form(self) -> tuple[bool, str]:
         """Validate the form inputs."""
@@ -661,11 +683,15 @@ class LXCCreateScreen(BaseScreen):
             self.app.call_from_thread(self.add_log, msg)
             self.app.call_from_thread(self._update_progress)
 
+        def detail_callback(msg: str):
+            self.app.call_from_thread(self.add_detail_log, msg)
+
         success, manager_key_path, message = initializer.initialize_vm(
             host=vm.host,
             root_key_path=Path(vm.ssh_key),
             vm_name=vm.name,
             callback=progress_callback,
+            detail_callback=detail_callback,
             port=vm.ssh_port,
         )
 

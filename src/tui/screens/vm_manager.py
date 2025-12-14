@@ -4,6 +4,7 @@ from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
+    Checkbox,
     DataTable,
     Footer,
     Input,
@@ -129,16 +130,27 @@ class VMManagerScreen(BaseScreen):
         display: block;
     }
 
-    #init-progress {
-        margin-bottom: 1;
+    #init-progress-row {
+        height: auto;
+        align: left middle;
+    }
+
+    #init-progress-row ProgressBar {
+        width: 1fr;
+    }
+
+    #init-progress-row Checkbox {
+        width: auto;
+        margin-left: 2;
     }
 
     #init-log-output {
         height: auto;
-        max-height: 10;
+        max-height: 15;
         border: solid $primary;
         padding: 1;
         background: $surface;
+        overflow-y: auto;
     }
     """
 
@@ -240,7 +252,11 @@ class VMManagerScreen(BaseScreen):
         )
         yield Vertical(
             Static("[bold]Initialization Progress[/bold]"),
-            ProgressBar(total=100, id="init-progress"),
+            Horizontal(
+                ProgressBar(total=100, id="init-progress"),
+                Checkbox("Show Details", id="init-show-details"),
+                id="init-progress-row",
+            ),
             Static("", id="init-log-output"),
             id="init-log-container",
         )
@@ -449,12 +465,21 @@ class VMManagerScreen(BaseScreen):
     def add_log(self, message: str) -> None:
         """Add a log message to the initialization output."""
         self.log_messages.append(message)
-        # Keep last 15 messages
-        if len(self.log_messages) > 15:
-            self.log_messages = self.log_messages[-15:]
+        # Keep last 30 messages
+        if len(self.log_messages) > 30:
+            self.log_messages = self.log_messages[-30:]
 
         log_output = self.query_one("#init-log-output", Static)
         log_output.update("\n".join(self.log_messages))
+
+    def add_detail_log(self, message: str) -> None:
+        """Add a detail log message (only if Show Details is enabled)."""
+        try:
+            show_details = self.query_one("#init-show-details", Checkbox).value
+            if show_details:
+                self.add_log(f"[dim]{message}[/dim]")
+        except Exception:
+            pass
 
     def _update_progress(self) -> None:
         """Update the initialization progress bar."""
@@ -554,11 +579,15 @@ class VMManagerScreen(BaseScreen):
             self.app.call_from_thread(self.add_log, msg)
             self.app.call_from_thread(self._update_progress)
 
+        def detail_callback(msg: str):
+            self.app.call_from_thread(self.add_detail_log, msg)
+
         success, manager_key_path, message = initializer.initialize_vm(
             host=vm.host,
             root_key_path=Path(vm.ssh_key),
             vm_name=vm.name,
             callback=progress_callback,
+            detail_callback=detail_callback,
             port=vm.ssh_port,
         )
 
