@@ -641,7 +641,7 @@ class VMManagerScreen(BaseScreen):
             try:
                 config_loader = get_config_loader()
                 # Delete SSH keys
-                from ...core.ssh_keygen import get_ssh_key_manager
+                from ...core.ssh_manager import get_ssh_key_manager
                 key_manager = get_ssh_key_manager()
                 key_manager.delete_keypair(f"{vm.name}_root")
                 key_manager.delete_keypair(f"{vm.name}_manager")
@@ -662,7 +662,7 @@ class VMManagerScreen(BaseScreen):
 
         try:
             from ...core.proxmox_api import get_proxmox_api, init_proxmox_from_config
-            from ...core.ssh_keygen import get_ssh_key_manager
+            from ...core.ssh_manager import get_ssh_key_manager
 
             config_loader = get_config_loader()
             settings = config_loader.load_settings()

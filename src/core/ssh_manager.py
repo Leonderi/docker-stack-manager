@@ -1,16 +1,136 @@
-"""SSH connection manager using Fabric."""
+"""SSH connection and key management."""
 
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from fabric import Connection
 from invoke.exceptions import UnexpectedExit
 from paramiko import RSAKey, Ed25519Key, ECDSAKey
 
 from .config_loader import VMConfig
-from .ssh_keygen import get_ssh_key_manager
+
+
+# =============================================================================
+# SSH Key Management
+# =============================================================================
+
+class SSHKeyManager:
+    """Manages SSH key generation and storage."""
+
+    def __init__(self, keys_dir: Optional[Path] = None):
+        """Initialize with keys directory."""
+        if keys_dir is None:
+            keys_dir = Path(__file__).parent.parent.parent / "config" / "ssh_keys"
+        self.keys_dir = Path(keys_dir)
+        self._ensure_keys_dir()
+
+    def _ensure_keys_dir(self) -> None:
+        """Ensure keys directory exists with proper permissions."""
+        self.keys_dir.mkdir(parents=True, exist_ok=True)
+        self.keys_dir.chmod(0o700)
+
+    def generate_keypair(self, name: str, comment: str = "") -> Tuple[Path, Path, str]:
+        """Generate a new Ed25519 SSH keypair."""
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        public_key = private_key.public_key()
+
+        private_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.OpenSSH,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+
+        public_bytes = public_key.public_bytes(
+            encoding=serialization.Encoding.OpenSSH,
+            format=serialization.PublicFormat.OpenSSH
+        )
+
+        public_key_str = public_bytes.decode('utf-8')
+        if comment:
+            public_key_str = f"{public_key_str} {comment}"
+
+        private_key_path = self.keys_dir / name
+        public_key_path = self.keys_dir / f"{name}.pub"
+
+        private_key_path.write_bytes(private_bytes)
+        private_key_path.chmod(0o600)
+
+        public_key_path.write_text(public_key_str + "\n")
+        public_key_path.chmod(0o644)
+
+        return private_key_path, public_key_path, public_key_str
+
+    def get_keypair(self, name: str) -> Tuple[Optional[Path], Optional[Path]]:
+        """Get existing keypair paths."""
+        private_key_path = self.keys_dir / name
+        public_key_path = self.keys_dir / f"{name}.pub"
+
+        if private_key_path.exists() and public_key_path.exists():
+            return private_key_path, public_key_path
+        return None, None
+
+    def get_or_create_keypair(self, name: str, comment: str = "") -> Tuple[Path, Path, str]:
+        """Get existing keypair or create new one."""
+        private_path, public_path = self.get_keypair(name)
+
+        if private_path and public_path:
+            public_key_content = public_path.read_text().strip()
+            return private_path, public_path, public_key_content
+
+        return self.generate_keypair(name, comment)
+
+    def get_public_key(self, name: str) -> Optional[str]:
+        """Get public key content by name."""
+        public_key_path = self.keys_dir / f"{name}.pub"
+        if public_key_path.exists():
+            return public_key_path.read_text().strip()
+        return None
+
+    def delete_keypair(self, name: str) -> bool:
+        """Delete a keypair by name."""
+        private_key_path = self.keys_dir / name
+        public_key_path = self.keys_dir / f"{name}.pub"
+
+        deleted = False
+        if private_key_path.exists():
+            private_key_path.unlink()
+            deleted = True
+        if public_key_path.exists():
+            public_key_path.unlink()
+            deleted = True
+
+        return deleted
+
+    def list_keys(self) -> list[str]:
+        """List all key names (without extensions)."""
+        keys = set()
+        for path in self.keys_dir.glob("*"):
+            if path.suffix == ".pub":
+                keys.add(path.stem)
+            elif not path.suffix and path.is_file():
+                keys.add(path.name)
+        return sorted(keys)
+
+
+# Global SSH key manager instance
+_ssh_key_manager: Optional[SSHKeyManager] = None
+
+
+def get_ssh_key_manager(keys_dir: Optional[Path] = None) -> SSHKeyManager:
+    """Get or create the global SSH key manager instance."""
+    global _ssh_key_manager
+    if _ssh_key_manager is None or keys_dir is not None:
+        _ssh_key_manager = SSHKeyManager(keys_dir)
+    return _ssh_key_manager
+
+
+# =============================================================================
+# SSH Connection Management
+# =============================================================================
 
 
 @dataclass

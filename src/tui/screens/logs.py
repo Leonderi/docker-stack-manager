@@ -2,16 +2,16 @@
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal
-from textual.screen import Screen
 from textual.widgets import Button, RichLog, Select, Static
 
+from ..base_screen import BaseScreen
 from ...core.config_loader import get_config_loader
 from ...core.docker_manager import get_docker_manager
 from ...core.traefik_manager import get_traefik_manager
 from ...stacks.base import get_available_stacks, get_stack
 
 
-class LogViewerScreen(Screen):
+class LogViewerScreen(BaseScreen):
     """Screen for viewing logs."""
 
     BINDINGS = [

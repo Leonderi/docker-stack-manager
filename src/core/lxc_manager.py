@@ -15,7 +15,7 @@ from .config_loader import (
     get_config_loader,
 )
 from .proxmox_api import ProxmoxAPI, ProxmoxAPIError, get_proxmox_api
-from .ssh_keygen import SSHKeyManager, get_ssh_key_manager
+from .ssh_manager import SSHKeyManager, get_ssh_key_manager
 
 
 @dataclass

@@ -2,7 +2,6 @@
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import (
     Button,
     Input,
@@ -14,11 +13,12 @@ from textual.widgets import (
     Static,
 )
 
+from ..base_screen import BaseScreen
 from ...core.config_loader import get_config_loader
 from ...stacks.base import get_available_stacks, get_stack, StackConfig
 
 
-class StackDeployScreen(Screen):
+class StackDeployScreen(BaseScreen):
     """Screen for deploying stacks."""
 
     def __init__(self):

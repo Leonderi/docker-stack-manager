@@ -2,15 +2,15 @@
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
+from ..base_screen import BaseScreen
 from ...core.config_loader import get_config_loader
 from ...core.docker_manager import get_docker_manager
 from ...core.traefik_manager import get_traefik_manager
 
 
-class DashboardScreen(Screen):
+class DashboardScreen(BaseScreen):
     """Main dashboard showing system overview."""
 
     CSS = """
