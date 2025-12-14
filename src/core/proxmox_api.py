@@ -50,10 +50,6 @@ class ProxmoxAPI:
 
         # Build authorization header
         self.auth_header = f"PVEAPIToken={user}!{token_name}={token_value}"
-        self.headers = {
-            "Authorization": self.auth_header,
-            "Content-Type": "application/json",
-        }
 
     def _request(
         self,
@@ -66,21 +62,23 @@ class ProxmoxAPI:
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
 
         try:
-            # For POST requests, use form data instead of JSON (Proxmox prefers this)
-            if method in ("POST", "PUT") and data:
+            if method in ("POST", "PUT"):
+                # Proxmox expects form data, not JSON
+                # Only include Authorization header (no Content-Type for empty body)
                 response = requests.request(
                     method=method,
                     url=url,
                     headers={"Authorization": self.auth_header},
-                    data=data,
+                    data=data if data else None,
                     verify=self.verify_ssl,
                     timeout=30,
                 )
             else:
+                # GET, DELETE requests
                 response = requests.request(
                     method=method,
                     url=url,
-                    headers=self.headers,
+                    headers={"Authorization": self.auth_header},
                     params=params,
                     verify=self.verify_ssl,
                     timeout=30,
